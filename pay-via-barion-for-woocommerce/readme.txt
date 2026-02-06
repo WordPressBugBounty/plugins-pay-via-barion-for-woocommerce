@@ -88,6 +88,11 @@ function disable_barion_pixel_for_editor() {
 ```
 
 == Changelog ==
+= 3.8.9 =
+* Fix: Display new  Barion logo on checkout blocks
+= 3.8.8 =
+* Update Barion logo
+* Change substr to mb_substr
 = 3.8.7 =
 * Fix for shipping tax calculation error
 = 3.8.6 =
