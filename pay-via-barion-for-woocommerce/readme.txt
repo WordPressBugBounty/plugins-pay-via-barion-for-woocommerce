@@ -5,8 +5,8 @@ Requires at least: 4.0
 Tested up to: 6.8.2
 WC requires at least: 3.0.0
 WC tested up to: 10.0.4
-Requires PHP: 5.6
-Stable tag: trunk
+Requires PHP: 8.2
+Stable tag: 3.10
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -88,6 +88,9 @@ function disable_barion_pixel_for_editor() {
 ```
 
 == Changelog ==
+= 3.10 =
+* Update: Upgraded the bundled Barion PHP library to version 2.1.0 (namespaced, native PHP enums)
+* Update: The plugin now requires PHP 8.2 or newer, following the updated Barion library
 = 3.9 =
 * Fix: Finalize the order on return from a successful payment when the Barion IPN callback is delayed or missing
 * Fix: Successful Barion IPN callback is no longer ignored for orders in on-hold status
