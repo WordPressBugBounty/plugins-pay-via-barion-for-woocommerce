@@ -3,7 +3,7 @@
 Plugin Name: Barion Payment Gateway for WooCommerce
 Plugin URI: http://github.com/szelpe/woocommerce-barion
 Description: Adds the ability to WooCommerce to pay via Barion
-Version: 3.10.2
+Version: 3.10.3
 Author: Aron Ocsvari <ugyfelszolgalat@bitron.hu>
 Author URI: https://bitron.hu
 License: GNU General Public License v3.0
@@ -58,6 +58,12 @@ add_action('woocommerce_blocks_loaded', [$this, 'register_checkout_blocks']);
 $this->barion_pixel = new WC_Gateway_Barion_Pixel();		
 
    add_filter('woocommerce_payment_gateways', [$this, 'woocommerce_add_gateway_barion_gateway']);
+        // Registered here rather than in the gateway constructor: a block
+        // checkout order can fail before the gateways are instantiated.
+        add_filter('rest_request_after_callbacks', ['WC_Gateway_Barion', 'log_store_api_checkout_failure'], 10, 3);
+        // Same reason: the checkout page has to clean up a leftover payment
+        // notice even on a page load where no gateway is ever instantiated.
+        add_action('template_redirect', ['WC_Gateway_Barion_Return_From_Payment', 'schedule_checkout_notice_cleanup']);
                //Adds notification to dashboard
         add_action('admin_notices', array($this, 'custom_admin_ad_notice'));
         add_action('wp_ajax_custom_admin_ad_dismiss', array($this, 'custom_admin_ad_dismiss'));

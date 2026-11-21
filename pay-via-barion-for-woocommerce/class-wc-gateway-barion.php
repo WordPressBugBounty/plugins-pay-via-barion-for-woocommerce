@@ -114,6 +114,56 @@ class WC_Gateway_Barion extends WC_Payment_Gateway {
     }
 
     /**
+     * Records block checkout ("Store API") order placements that fail before
+     * this gateway is reached.
+     *
+     * Without this, such a failure leaves NOTHING in the Barion log -- the
+     * gateway never runs -- while WooCommerce only writes an unexplained
+     * "[Store API #FAIL] Placing Order failed" line into its own place-order
+     * log, keeping the actual reason in the log context. That combination makes
+     * the failure impossible to diagnose on a live shop, which is exactly what
+     * happened to a merchant on 2026-08-17.
+     *
+     * @param WP_REST_Response|WP_Error|mixed $response
+     * @param array                           $handler
+     * @param WP_REST_Request                 $request
+     * @return WP_REST_Response|WP_Error|mixed
+     */
+    public static function log_store_api_checkout_failure($response, $handler, $request) {
+        if (!is_a($request, 'WP_REST_Request')
+            || 'POST' !== $request->get_method()
+            || '/wc/store/v1/checkout' !== untrailingslashit($request->get_route())
+            || 'barion' !== $request->get_param('payment_method')) {
+            return $response;
+        }
+
+        if (is_wp_error($response)) {
+            self::log(sprintf(
+                'Block checkout could not place the order. WooCommerce error code: %s. Message: %s',
+                $response->get_error_code(),
+                $response->get_error_message()
+            ));
+
+            return $response;
+        }
+
+        if (!is_a($response, 'WP_REST_Response') || $response->get_status() < 400) {
+            return $response;
+        }
+
+        $data = $response->get_data();
+
+        self::log(sprintf(
+            'Block checkout could not place the order (HTTP %d). WooCommerce error code: %s. Message: %s',
+            $response->get_status(),
+            isset($data['code']) ? $data['code'] : '(none)',
+            isset($data['message']) ? $data['message'] : '(none)'
+        ));
+
+        return $response;
+    }
+
+    /**
     * Get gateway icon.
     * @return string
      */
@@ -311,6 +361,80 @@ public function get_expired_status() {
     public function payment_complete($order, $transaction_id = '') {
         $order->payment_complete($transaction_id);
         $this->update_order_status($order);
+    }
+
+    /**
+     * Serialises the "already paid? -> finalise" step of the return page and
+     * the IPN for one order.
+     *
+     * Barion fires the IPN and redirects the browser at the same moment. Both
+     * requests spend about a second in GetPaymentState() and then checked the
+     * order they had loaded BEFORE that call, so neither saw the other's
+     * payment and payment_complete() ran twice: on the test shop on 2026-11-20
+     * in 14 of 18 simultaneous pairs, each time with two "Completed" and two
+     * "New order" mails, and in 8 of them with two download permission rows.
+     *
+     * MySQL GET_LOCK() is atomic, and the server drops the lock when the
+     * request's connection closes, so a request that dies inside cannot leave
+     * it stuck. An option or a transient would not do: reading and writing it
+     * are two separate queries, which is the very race this closes.
+     *
+     * @param int $order_id
+     * @return bool False only if another request held the lock for the whole
+     *              wait: that request is finalising this order. If the database
+     *              cannot give a lock at all (NULL), the step runs unlocked, as
+     *              it did before, rather than never finalising the order.
+     */
+    public function lock_order($order_id) {
+        global $wpdb;
+
+        // 10 s is several times what finalising takes (about 2 s with the mails
+        // on the test shop), so the waiting request normally gets the lock and
+        // then finds the order already paid.
+        $result = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', self::order_lock_name($order_id), 10));
+
+        if (null === $result) {
+            self::log('Could not take the lock for order #' . $order_id . ', continuing without it. ' . $wpdb->last_error);
+
+            return true;
+        }
+
+        return '1' === (string) $result;
+    }
+
+    /**
+     * @param int $order_id
+     */
+    public function unlock_order($order_id) {
+        global $wpdb;
+
+        $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', self::order_lock_name($order_id)));
+    }
+
+    /**
+     * Lock names are global to the MySQL server, hence the table prefix. Two
+     * sites sharing both a server and a prefix would only wait for each other
+     * on equal order IDs, which is harmless.
+     */
+    private static function order_lock_name($order_id) {
+        global $wpdb;
+
+        return $wpdb->prefix . 'barion_order_' . (int) $order_id;
+    }
+
+    /**
+     * Loads the order again from the database, past this request's caches:
+     * whatever this request loaded earlier may predate the other request's
+     * payment.
+     *
+     * @param WC_Order $order
+     * @return WC_Order
+     */
+    public function get_fresh_order($order) {
+        clean_post_cache($order->get_id());
+        $class = get_class($order);
+
+        return new $class($order->get_id());
     }
 
     public function update_order_status($order) {

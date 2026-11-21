@@ -6,7 +6,7 @@ Tested up to: 6.8.2
 WC requires at least: 3.0.0
 WC tested up to: 10.0.4
 Requires PHP: 8.2
-Stable tag: 3.10.2
+Stable tag: 3.10.3
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -88,6 +88,8 @@ function disable_barion_pixel_for_editor() {
 ```
 
 == Changelog ==
+= 3.10.3 =
+* Fix: Complete the order only once when the customer's return and the Barion callback arrive at the same time (duplicated callback)
 = 3.10.2 =
 * Add: Show a cart notice informing the customer when a Barion payment was cancelled or declined
 * Add: Hungarian translation for the new notice

@@ -25,7 +25,18 @@ class WC_Gateway_Barion_IPN_Handler {
         if(empty($_GET) || empty($_GET['paymentId']))
             exit;
 
-        $payment_details = $this->barion_client->GetPaymentState($_GET['paymentId']);
+        try {
+            $payment_details = $this->barion_client->GetPaymentState($_GET['paymentId']);
+        } catch (\Throwable $e) {
+            // Same failure as on the return page: an answer from the Barion API
+            // that is not JSON makes the library throw a TypeError, and uncaught
+            // it ended the callback with an HTTP 500 (measured on the test shop
+            // on 2026-11-20). The payment state is unknown, so this is handled
+            // like the error branch below.
+            $this->gateway::log('GetPaymentState failed: ' . $e->getMessage());
+
+            exit;
+        }
 
         if(!empty($payment_details->Errors)) {
             $this->gateway::log('GetPaymentState returned errors. Payment details: ' . json_encode($payment_details));
@@ -49,8 +60,20 @@ if ($orders) {
     $order = wc_get_order($order_id);
     
 } else {
-   $order = new WC_Order($payment_details->PaymentRequestId);
+   // new WC_Order() throws for an id without an order (a deleted test order,
+   // measured on the test shop on 2026-11-20), which ended the callback with
+   // an HTTP 500 and Barion kept retrying; wc_get_order() returns false.
+   $order = wc_get_order($payment_details->PaymentRequestId);
 }
+
+        if(empty($order)) {
+            $this->gateway::log('IPN: no order found for PaymentRequestId "' . $payment_details->PaymentRequestId . '", paymentId: ' . $_GET['paymentId'] . '. Payment details: ' . json_encode($payment_details));
+            exit;
+        }
+
+        // An exception while processing the callback of an existing order is
+        // recorded in the log and on the order instead of ending in an HTTP 500.
+        try {
         $this->gateway::log("IPN called, orderid: ".$order->get_id());
 		
 		if ($_GET['paymentId'] !=$this->gateway->get_barion_payment_id($order)) {
@@ -58,10 +81,6 @@ if ($orders) {
 			exit;
 		}
 				
-        if(empty($order)) {
-            $this->gateway::log('Invalid PaymentRequestId: ' . $_GET['paymentId'] . '. Payment details: ' . json_encode($payment_details));
-            exit;
-        }
         $order->add_order_note(__('Barion callback received.', 'pay-via-barion-for-woocommerce') . ' paymentId: "' . $_GET['paymentId'] . '"');
 if ($order->meta_exists('_barion_payment_close')) {
 	            $order->add_order_note(__('Barion callback ignored, the payment closed.', 'pay-via-barion-for-woocommerce'));
@@ -88,6 +107,23 @@ $payment_method = $order->get_payment_method();
                 exit;
             }
 
+            // The checks above ran on the order loaded before GetPaymentState(),
+            // so they are repeated under the order lock on a freshly read order:
+            // the return page may have finalised it meanwhile, see
+            // WC_Gateway_Barion::lock_order().
+            if(!$this->gateway->lock_order($order->get_id())) {
+                $this->gateway::log('IPN: order #' . $order->get_id() . ' is being finalised by another request, not finalising it again.');
+                exit;
+            }
+
+            try {
+                $order = $this->gateway->get_fresh_order($order);
+
+                if($order->has_status(array('processing', 'completed'))
+                    || $order->has_status($this->gateway->get_successfull_status())
+                    || $order->meta_exists('_barion_payment_close')) {
+                    $order->add_order_note(__('Barion callback ignored as the payment was already completed.', 'pay-via-barion-for-woocommerce'));
+                } else {
             $order->add_order_note(__('Payment succeeded via Barion.', 'pay-via-barion-for-woocommerce'));
 			if ($order->meta_exists('_barion_payment_close')) {
 												$order->update_meta_data("_barion_payment_close", 1);						
@@ -97,6 +133,11 @@ $payment_method = $order->get_payment_method();
 				$order->save();
 
             $this->gateway->payment_complete($order, $this->find_transaction_id($payment_details, $order));
+                }
+            } finally {
+                $this->gateway->unlock_order($order->get_id());
+            }
+
             exit;
         }
 
@@ -124,6 +165,12 @@ $payment_method = $order->get_payment_method();
         $order->update_status('failed', __('Payment failed via Barion.', 'pay-via-barion-for-woocommerce'));
         $this->gateway::log('Payment failed. Payment details: ' . json_encode($payment_details));
 		exit;
+        } catch (\Throwable $e) {
+            $this->gateway::log('IPN processing failed for order #' . $order->get_id() . ', paymentId: ' . $_GET['paymentId'] . ': ' . $e->getMessage());
+            $order->add_order_note(__('Barion callback processing failed.', 'pay-via-barion-for-woocommerce') . ' ' . $e->getMessage());
+
+            exit;
+        }
     }
 
     function find_transaction_id($payment_details, $order) {
